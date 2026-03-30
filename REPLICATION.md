@@ -420,3 +420,119 @@ The architecture is platform-agnostic at the agent layer. To adapt for a differe
 6. Keep `db.ts`, `memory.ts`, `scheduler.ts` unchanged -- they're platform-independent
 
 The core value is in `agent.ts` + `CLAUDE.md` + session resumption. Everything else is platform glue.
+
+## Troubleshooting
+
+Common pitfalls and how to diagnose them.
+
+### Bot Receives Messages But Doesn't Reply
+
+**Symptom:** Telegram shows the message was delivered but no response comes back.
+
+**Diagnosis:**
+1. Check the service is running: `systemctl --user status claudeclaw`
+2. Check logs for errors: `journalctl --user -u claudeclaw -n 50`
+3. Verify `ALLOWED_CHAT_ID` matches your chat: send `/chatid` to the bot
+4. Check Claude CLI is authenticated: `claude --version` (if it prompts for login, auth has expired)
+
+**Common causes:**
+- Claude API rate limit hit — check logs for 429 errors. Wait and retry.
+- Session ID corrupted — run `/newchat` to start fresh session.
+- Anthropic API key expired or invalid — check `.env` file.
+
+### Voice Messages Not Transcribed
+
+**Symptom:** Voice messages arrive but get `[Voice transcription failed]` response.
+
+**Diagnosis:**
+1. Check `GROQ_API_KEY` is set in `.env`
+2. Test Groq API manually: `curl -s https://api.groq.com/openai/v1/models -H "Authorization: Bearer $GROQ_API_KEY"`
+3. Check file format — Telegram sends `.oga`, the bot renames to `.ogg` for Whisper
+
+**Common causes:**
+- Groq API key not set or expired
+- Groq rate limit (free tier: 20 requests/minute)
+- Temp file cleanup happening too fast — check `/tmp/` for orphaned audio files
+
+### Memory Not Persisting Across Restarts
+
+**Symptom:** Bot forgets everything after service restart.
+
+**Diagnosis:**
+1. Check SQLite database exists: `ls -la data/claudeclaw.db` (or wherever `DB_PATH` points)
+2. Verify session resumption: check logs for `Resuming session:` entries
+3. Test FTS5: `sqlite3 data/claudeclaw.db "SELECT * FROM memories ORDER BY created_at DESC LIMIT 5;"`
+
+**Common causes:**
+- Database file in a temp directory that gets cleaned
+- Session ID not being stored/retrieved from the sessions table
+- Memory salience decayed below threshold (0.1) — all old memories auto-deleted
+
+### Scheduled Tasks Not Firing
+
+**Symptom:** Cron tasks defined but never execute.
+
+**Diagnosis:**
+1. List active tasks: `node dist/schedule-cli.js list`
+2. Check scheduler is running — look for `Scheduler tick` in logs
+3. Verify cron expression: use [crontab.guru](https://crontab.guru) to validate
+4. Check if the task is paused: `sqlite3 data/claudeclaw.db "SELECT * FROM scheduled_tasks WHERE status='active';"`
+
+**Common causes:**
+- Scheduler poll interval (60s) means tasks can be delayed up to 1 minute
+- Exponential backoff after failure — task may be in cooldown (check `next_run_at`)
+- Task assigned to wrong `chat_id` — verify the chat ID matches your Telegram chat
+
+### Agent SDK Query Hangs
+
+**Symptom:** Message sent but the agent never returns a response. No error, just silence.
+
+**Diagnosis:**
+1. Check if a Claude process is running: `ps aux | grep claude`
+2. Look for zombie sessions: the Agent SDK spawns a `claude` subprocess that may hang
+3. Check PID lock: if `claudeclaw.pid` exists with a dead PID, the service won't start a new instance
+
+**Common causes:**
+- Claude CLI update changed the binary path
+- System out of memory (check `free -h`) — Claude processes are memory-hungry
+- Network issue to Anthropic API — check `curl -s https://api.anthropic.com/v1/messages`
+
+### WhatsApp Bridge Issues
+
+**Symptom:** WhatsApp messages not being captured or sent.
+
+**Diagnosis:**
+1. Check if Puppeteer/Chrome is running: `ps aux | grep chrome`
+2. QR code may need re-scanning — check logs for `qr` event
+3. Verify `whatsapp-web.js` session data exists in `.wwebjs_auth/`
+
+**Common causes:**
+- WhatsApp Web session expired (re-scan QR code)
+- Puppeteer can't find Chrome — set `PUPPETEER_EXECUTABLE_PATH` in `.env`
+- On headless servers: need `--no-sandbox` flag for Chromium
+
+### Duplicate Bot Instances
+
+**Symptom:** Bot sends multiple responses to the same message, or messages go missing.
+
+**Diagnosis:**
+1. Check for multiple processes: `pgrep -f claudeclaw`
+2. Check PID lock file: `cat claudeclaw.pid`
+3. If both systemd and a manual `npm start` are running, one will steal Telegram poll updates
+
+**Fix:** Kill all instances, then start only via systemd: `systemctl --user restart claudeclaw`
+
+### Environment Variable Not Loading
+
+**Symptom:** A feature doesn't work even though the key is in `.env`.
+
+**Diagnosis:**
+1. Verify `.env` is in the project root (same directory as `package.json`)
+2. Check for special characters in values — wrap in double quotes if needed
+3. Verify the key name matches exactly (case-sensitive)
+4. After changing `.env`, restart the service: `systemctl --user restart claudeclaw`
+
+**Common causes:**
+- `.env` file has trailing whitespace on the key line
+- Value contains `#` which is interpreted as a comment — wrap in quotes
+- Key name has a typo (e.g., `GROQ_API_KEY` vs `GROK_API_KEY`)
