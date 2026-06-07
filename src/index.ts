@@ -6,7 +6,7 @@ import { logger } from './logger.js';
 import { runDecaySweep } from './memory.js';
 import { cleanupOldUploads } from './media.js';
 import { createBot } from './bot.js';
-import { initScheduler, stopScheduler } from './scheduler.js';
+import { stopScheduler } from './scheduler.js';
 
 const PID_FILE = join(STORE_DIR, 'claudeclaw.pid');
 
@@ -67,14 +67,13 @@ async function main(): Promise<void> {
   // Clean up old uploads
   cleanupOldUploads();
 
-  // Create and start bot
+  // Create and start bot.
+  // NOTE: createBot() already calls initScheduler() internally (via safeSend).
+  // Do NOT call initScheduler() again here — a second call starts a duplicate
+  // 60s polling loop, causing every scheduled task to execute twice
+  // concurrently (doubled messages + concurrent `claude` spawns racing on the
+  // shared OAuth credentials file).
   const bot = createBot();
-
-  // Initialize scheduler
-  const sendFn = async (chatId: string, text: string) => {
-    await bot.api.sendMessage(chatId, text);
-  };
-  initScheduler(sendFn);
 
   // Graceful shutdown
   const shutdown = () => {
