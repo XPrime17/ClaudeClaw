@@ -29,7 +29,7 @@ import {
   pauseTask,
   resumeTask,
 } from './db.js';
-import { runAgent } from './agent.js';
+import { runAgent, formatAgentError } from './agent.js';
 import { buildMemoryContext, saveConversationTurn } from './memory.js';
 import { transcribeAudio, voiceCapabilities } from './voice.js';
 import {
@@ -261,14 +261,26 @@ async function handleMessage(
     // Stop typing
     typing = false;
 
-    if (!result.text) {
-      await bot.api.sendMessage(chatId, '(no response from agent)');
+    // Persist session even on error so the next message can resume.
+    if (result.newSessionId) {
+      setSession(String(chatId), result.newSessionId);
+    }
+
+    // SDK returned a non-success result (max turns, execution error, etc.).
+    // Report the diagnostic to the user instead of silently passing it off as
+    // a normal reply. Include any partial output the agent did produce.
+    if (result.error) {
+      logger.warn({ chatId, error: result.error }, 'Agent returned SDK error to user');
+      if (result.text) {
+        await safeSend(bot, chatId, result.text);
+      }
+      await safeSend(bot, chatId, formatAgentError(result.error));
       return;
     }
 
-    // Persist session
-    if (result.newSessionId) {
-      setSession(String(chatId), result.newSessionId);
+    if (!result.text) {
+      await bot.api.sendMessage(chatId, '(no response from agent)');
+      return;
     }
 
     // Save conversation turn for memory

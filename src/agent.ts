@@ -1,7 +1,42 @@
 import { query } from '@anthropic-ai/claude-agent-sdk';
-import type { SDKResultSuccess } from '@anthropic-ai/claude-agent-sdk';
+import type { SDKResultSuccess, SDKResultError } from '@anthropic-ai/claude-agent-sdk';
 import { AGENT_CWD } from './config.js';
 import { logger } from './logger.js';
+
+/** Structured diagnostics for an SDK-returned (non-success) result. */
+export interface AgentError {
+  /** SDK result subtype, e.g. 'error_max_turns', 'error_during_execution'. */
+  type: string;
+  /** Error strings the SDK attached to the result (SDKResultError.errors). */
+  messages: string[];
+  /** Last assistant text seen — often the human-readable reason. */
+  detail?: string;
+  /** How many turns the agent took before the error. */
+  numTurns?: number;
+  /** How many tool calls were denied by permissions. */
+  permissionDenials?: number;
+}
+
+export interface AgentResult {
+  /** Final (or partial) assistant text, if any. */
+  text: string | null;
+  /** Session id to resume next time. */
+  newSessionId?: string;
+  /** Present only when the SDK returned a non-success result. */
+  error?: AgentError;
+}
+
+/** Render an AgentError as a concise, user-facing diagnostic for Telegram. */
+export function formatAgentError(error: AgentError): string {
+  const lines: string[] = [`⚠️ Agent error (${error.type})`];
+  const body = (error.messages.length ? error.messages.join('\n') : error.detail || '').trim();
+  if (body) lines.push(body);
+  const meta: string[] = [];
+  if (typeof error.numTurns === 'number') meta.push(`turns: ${error.numTurns}`);
+  if (error.permissionDenials) meta.push(`denied tools: ${error.permissionDenials}`);
+  if (meta.length) lines.push(`(${meta.join(', ')})`);
+  return lines.join('\n');
+}
 
 // Scrub Claude Code sentinel env vars so the spawned `claude` subprocess
 // doesn't trip the "cannot be launched inside another Claude Code session"
@@ -20,9 +55,10 @@ export async function runAgent(
   message: string,
   sessionId?: string,
   onTyping?: () => void
-): Promise<{ text: string | null; newSessionId?: string }> {
+): Promise<AgentResult> {
   let newSessionId: string | undefined;
   let resultText: string | null = null;
+  let agentError: AgentError | undefined;
   // Track the last assistant text we saw. When `claude` fails (e.g. expired
   // login), the SDK throws a generic "process exited with code 1" but the real
   // reason — "Not logged in · Please run /login" — is delivered as a synthetic
@@ -63,12 +99,23 @@ export async function runAgent(
         if (event.subtype === 'success') {
           resultText = (event as SDKResultSuccess).result ?? null;
         } else {
-          // Error result — surface the actual assistant text when present.
+          // Non-success result — capture structured diagnostics so the caller
+          // can report the real error to the user instead of treating it as a
+          // normal reply.
+          const er = event as SDKResultError;
+          agentError = {
+            type: er.subtype,
+            messages: Array.isArray(er.errors) ? er.errors : [],
+            detail: lastAssistantText ?? undefined,
+            numTurns: er.num_turns,
+            permissionDenials: er.permission_denials?.length ?? 0,
+          };
           logger.warn(
-            { subtype: event.subtype, detail: lastAssistantText },
+            { subtype: er.subtype, errors: agentError.messages, detail: lastAssistantText },
             'Agent returned non-success result',
           );
-          resultText = lastAssistantText || `Error: ${event.subtype}`;
+          // Keep any partial assistant text so the user still sees it.
+          resultText = lastAssistantText ?? null;
         }
       }
     }
@@ -92,5 +139,5 @@ export async function runAgent(
     if (typingInterval) clearInterval(typingInterval);
   }
 
-  return { text: resultText, newSessionId };
+  return { text: resultText, newSessionId, error: agentError };
 }

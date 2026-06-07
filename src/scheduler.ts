@@ -1,7 +1,7 @@
 import cronParser from 'cron-parser';
 const { parseExpression } = cronParser;
 import { getDueTasks, updateTaskAfterRun } from './db.js';
-import { runAgent } from './agent.js';
+import { runAgent, formatAgentError } from './agent.js';
 import { logger } from './logger.js';
 
 type Sender = (chatId: string, text: string) => Promise<void>;
@@ -56,6 +56,12 @@ export async function runDueTasks(): Promise<void> {
       );
 
       const agentResult = await runAgent(task.prompt);
+      // An SDK non-success result (max turns, execution error, …) is a task
+      // failure — route it through the catch so backoff + the diagnostic
+      // notification apply, same as a thrown error.
+      if (agentResult.error) {
+        throw new Error(formatAgentError(agentResult.error));
+      }
       const result = agentResult.text || '(no output)';
       const nextRun = computeNextRun(task.schedule);
       updateTaskAfterRun(task.id, nextRun, result);
