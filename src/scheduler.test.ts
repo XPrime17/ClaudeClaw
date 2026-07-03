@@ -32,9 +32,16 @@ const loggerMocks = vi.hoisted(() => ({
   },
 }));
 
+// The scheduler wires in the log-only completion sweep; mock it wholesale so
+// these tests stay hermetic (the sweep is tested in completion.test.ts).
+const completionMocks = vi.hoisted(() => ({
+  sweepCompletions: vi.fn(),
+}));
+
 vi.mock('./db.js', () => dbMocks);
 vi.mock('./agent.js', () => agentMocks);
 vi.mock('./logger.js', () => loggerMocks);
+vi.mock('./completion.js', () => completionMocks);
 
 import { computeNextRun, initScheduler, runDueTasks, stopScheduler } from './scheduler.js';
 

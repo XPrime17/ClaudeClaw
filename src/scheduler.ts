@@ -9,6 +9,7 @@ import {
   updateTaskAfterRun,
 } from './db.js';
 import { runAgent, formatAgentError } from './agent.js';
+import { sweepCompletions } from './completion.js';
 import { logger } from './logger.js';
 
 type Sender = (chatId: string, text: string) => Promise<void>;
@@ -35,6 +36,10 @@ const MAX_RETRIES = 5;
 /** Per-task consecutive failure counter (resets on success or process restart). */
 const failureCounts = new Map<string, number>();
 
+/** Log-only completion sweep runs at most hourly; never affects scheduling. */
+const SWEEP_INTERVAL_MS = 60 * 60_000;
+let lastSweepMs = 0;
+
 /**
  * Start the scheduler loop. Call once at boot after the bot is ready.
  * The `send` callback is used to push results back to the originating chat.
@@ -48,6 +53,7 @@ export function initScheduler(send: Sender): void {
   schedulerStarted = true;
   try {
     resyncActiveTaskRuns();
+    runCompletionSweep(); // one log-only sweep at boot after resync
     intervalId = setInterval(runDueTasks, 60_000);
     logger.info('Scheduler initialized (polling every 60s)');
   } catch (err) {
@@ -61,6 +67,7 @@ export function initScheduler(send: Sender): void {
  * Called automatically every 60 s by the scheduler interval.
  */
 export async function runDueTasks(): Promise<void> {
+  runCompletionSweep();
   const tasks = getDueTasks();
   for (const task of tasks) {
     const now = Date.now();
@@ -197,6 +204,17 @@ function resyncActiveTaskRuns(): void {
       );
     }
   }
+}
+
+/**
+ * Run the log-only data-landed sweep at most once per hour. Purely
+ * observational — it never mutates next_run, backoff, or failure counters.
+ */
+function runCompletionSweep(): void {
+  const now = Date.now();
+  if (now - lastSweepMs < SWEEP_INTERVAL_MS) return;
+  lastSweepMs = now;
+  sweepCompletions(now);
 }
 
 function errorMessage(err: unknown): string {

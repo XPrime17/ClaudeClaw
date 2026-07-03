@@ -1,4 +1,5 @@
 import { mkdirSync } from 'fs';
+import { homedir } from 'os';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { readEnvFile } from './env.js';
@@ -39,6 +40,14 @@ export const ELEVENLABS_VOICE_ID = env.ELEVENLABS_VOICE_ID ?? '';
 
 /** IANA timezone for cron scheduling + schedule display (user's local tz). */
 export const TIMEZONE = env.TIMEZONE ?? 'America/Toronto';
+
+/**
+ * Root of the OpenClaw workspace where the user's meal/weight data JSON lives.
+ * Used by completion tracking to check whether nudged data actually landed.
+ * Defaults to ~/.openclaw/workspace (the layout on the target box).
+ */
+export const WORKSPACE_DIR =
+  env.WORKSPACE_DIR ?? join(homedir(), '.openclaw', 'workspace');
 
 // ---------------------------------------------------------------------------
 // Application constants

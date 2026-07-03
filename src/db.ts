@@ -94,6 +94,34 @@ export function initDatabase(): Database.Database {
   `);
 
   // -------------------------------------------------------------------------
+  // completion_check column on scheduled_tasks (idempotent — guarded by PRAGMA)
+  // Stores JSON: { "kind":"weight" } | { "kind":"meal", "mealType"?:... }.
+  // NULL = task is not completion-tracked.
+  // -------------------------------------------------------------------------
+  const taskCols = db
+    .prepare(`PRAGMA table_info(scheduled_tasks)`)
+    .all() as Array<{ name: string }>;
+  if (!taskCols.some((c) => c.name === 'completion_check')) {
+    db.exec(`ALTER TABLE scheduled_tasks ADD COLUMN completion_check TEXT NULL;`);
+  }
+
+  // -------------------------------------------------------------------------
+  // Task completion log (log-only: records whether the user's data landed
+  // per task per Toronto-day). Never drives scheduling/retry behaviour.
+  // -------------------------------------------------------------------------
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS task_completion_log (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      task_id     TEXT    NOT NULL,
+      day         TEXT    NOT NULL,
+      data_landed INTEGER NOT NULL DEFAULT 0,
+      landed_at   INTEGER,
+      checked_at  INTEGER NOT NULL,
+      UNIQUE(task_id, day)
+    );
+  `);
+
+  // -------------------------------------------------------------------------
   // WhatsApp outbox
   // -------------------------------------------------------------------------
   db.exec(`
@@ -290,6 +318,7 @@ export interface ScheduledTask {
   last_run: number | null;
   last_result: string | null;
   status: 'active' | 'paused';
+  completion_check: string | null;
   created_at: number;
 }
 
@@ -464,4 +493,76 @@ export function getWaMessages(
        ORDER BY created_at DESC LIMIT ?`
     )
     .all(chatJid, limit) as any[];
+}
+
+// ---------------------------------------------------------------------------
+// Task completion tracking (log-only)
+// ---------------------------------------------------------------------------
+
+/** Set (or clear, with null) a task's completion_check JSON. */
+export function setTaskCompletionCheck(id: string, json: string | null): boolean {
+  const result = getDb()
+    .prepare('UPDATE scheduled_tasks SET completion_check = ? WHERE id = ?')
+    .run(json, id);
+  return result.changes > 0;
+}
+
+/** Active tasks that have a completion_check configured. */
+export function getTasksWithChecks(): ScheduledTask[] {
+  return getDb()
+    .prepare(
+      `SELECT * FROM scheduled_tasks
+       WHERE status = 'active' AND completion_check IS NOT NULL
+       ORDER BY next_run ASC`
+    )
+    .all() as ScheduledTask[];
+}
+
+/**
+ * Upsert a per-task per-day completion record. Re-checking the same day is
+ * intentional (data arrives throughout the day), so ON CONFLICT overwrites.
+ */
+export function upsertCompletionLog(row: {
+  taskId: string;
+  day: string;
+  dataLanded: boolean;
+  landedAt: number | null;
+  checkedAt: number;
+}): void {
+  getDb()
+    .prepare(
+      `INSERT INTO task_completion_log (task_id, day, data_landed, landed_at, checked_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(task_id, day) DO UPDATE SET
+         data_landed = excluded.data_landed,
+         landed_at   = excluded.landed_at,
+         checked_at  = excluded.checked_at`
+    )
+    .run(row.taskId, row.day, row.dataLanded ? 1 : 0, row.landedAt, row.checkedAt);
+}
+
+/** Distinct days (from `days`) that have any landed=1 record across all tasks. */
+export function countLandedDays(days: string[]): number {
+  if (days.length === 0) return 0;
+  const placeholders = days.map(() => '?').join(', ');
+  const row = getDb()
+    .prepare(
+      `SELECT COUNT(DISTINCT day) AS n FROM task_completion_log
+       WHERE data_landed = 1 AND day IN (${placeholders})`
+    )
+    .get(...days) as { n: number };
+  return row.n;
+}
+
+/** landed=1 days for a single task within the supplied day list. */
+export function getTaskLandedDays(taskId: string, days: string[]): Set<string> {
+  if (days.length === 0) return new Set();
+  const placeholders = days.map(() => '?').join(', ');
+  const rows = getDb()
+    .prepare(
+      `SELECT DISTINCT day FROM task_completion_log
+       WHERE task_id = ? AND data_landed = 1 AND day IN (${placeholders})`
+    )
+    .all(taskId, ...days) as Array<{ day: string }>;
+  return new Set(rows.map((r) => r.day));
 }
