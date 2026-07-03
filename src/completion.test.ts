@@ -47,6 +47,24 @@ describe('entryLandedOnDay — timestamp Toronto-day predicate', () => {
     expect(entryLandedOnDay(entry, '2026-07-02', 'America/Toronto')).toBe(true);
   });
 
+  test('just-after-midnight Toronto entry lands on the new Toronto day', () => {
+    // 2026-07-02 00:30 America/Toronto (EDT, -04:00) == 2026-07-02T04:30Z
+    const entry = { date: '2026-07-02', timestamp: '2026-07-02T04:30:00.000Z' };
+    expect(entryLandedOnDay(entry, '2026-07-02', 'America/Toronto')).toBe(true);
+    expect(entryLandedOnDay(entry, '2026-07-01', 'America/Toronto')).toBe(false);
+  });
+
+  test('KNOWN LIMITATION: timestamp-less evening entry attributes to the UTC day', () => {
+    // An entry written 20:00-23:59 Toronto WITHOUT a timestamp carries the
+    // next UTC day in `date`; the fallback can only trust that field, so it
+    // buckets to the UTC day, not the true Toronto day. Both production
+    // writers always set `timestamp` (recon-verified), so this is a rare
+    // degraded mode — asserted here so the behavior is explicit, not silent.
+    const entry = { date: '2026-07-03' }; // written 2026-07-02 evening Toronto
+    expect(entryLandedOnDay(entry, '2026-07-02', 'America/Toronto')).toBe(false);
+    expect(entryLandedOnDay(entry, '2026-07-03', 'America/Toronto')).toBe(true);
+  });
+
   test('falls back to date field when timestamp is missing', () => {
     const entry = { date: '2026-07-02' };
     expect(entryLandedOnDay(entry, '2026-07-02', 'America/Toronto')).toBe(true);
