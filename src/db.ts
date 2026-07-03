@@ -318,6 +318,43 @@ export function getDueTasks(): ScheduledTask[] {
     .all(Date.now()) as ScheduledTask[];
 }
 
+export function getActiveTasks(): ScheduledTask[] {
+  return getDb()
+    .prepare(
+      `SELECT * FROM scheduled_tasks
+       WHERE status = 'active'
+       ORDER BY next_run ASC`
+    )
+    .all() as ScheduledTask[];
+}
+
+export function setTaskNextRun(id: string, nextRun: number): void {
+  getDb()
+    .prepare(
+      `UPDATE scheduled_tasks
+       SET next_run = ?
+       WHERE id = ?`
+    )
+    .run(nextRun, id);
+}
+
+/**
+ * Atomically claim a due task by advancing its next_run past `now`.
+ * Guards against two schedulers (or a double loop) executing the same task:
+ * only the executor whose UPDATE actually mutates a row (changes === 1) owns
+ * the run. Returns false if another executor already claimed it.
+ */
+export function claimTask(id: string, newNextRun: number, now: number): boolean {
+  const result = getDb()
+    .prepare(
+      `UPDATE scheduled_tasks
+       SET next_run = ?
+       WHERE id = ? AND next_run <= ?`
+    )
+    .run(newNextRun, id, now);
+  return result.changes > 0;
+}
+
 export function updateTaskAfterRun(
   id: string,
   nextRun: number,

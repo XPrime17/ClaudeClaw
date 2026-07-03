@@ -37,6 +37,9 @@ export const ELEVENLABS_API_KEY = env.ELEVENLABS_API_KEY ?? '';
 /** ElevenLabs voice ID for TTS output. */
 export const ELEVENLABS_VOICE_ID = env.ELEVENLABS_VOICE_ID ?? '';
 
+/** IANA timezone for cron scheduling + schedule display (user's local tz). */
+export const TIMEZONE = env.TIMEZONE ?? 'America/Toronto';
+
 // ---------------------------------------------------------------------------
 // Application constants
 // ---------------------------------------------------------------------------

@@ -1,6 +1,13 @@
 import cronParser from 'cron-parser';
 const { parseExpression } = cronParser;
-import { getDueTasks, updateTaskAfterRun } from './db.js';
+import { TIMEZONE } from './config.js';
+import {
+  claimTask,
+  getActiveTasks,
+  getDueTasks,
+  setTaskNextRun,
+  updateTaskAfterRun,
+} from './db.js';
 import { runAgent, formatAgentError } from './agent.js';
 import { logger } from './logger.js';
 
@@ -8,6 +15,7 @@ type Sender = (chatId: string, text: string) => Promise<void>;
 
 let sender: Sender;
 let intervalId: ReturnType<typeof setInterval> | null = null;
+let schedulerStarted = false;
 
 /** Base backoff delay in ms (60 seconds). */
 const BACKOFF_BASE_MS = 60_000;
@@ -32,9 +40,20 @@ const failureCounts = new Map<string, number>();
  * The `send` callback is used to push results back to the originating chat.
  */
 export function initScheduler(send: Sender): void {
+  if (schedulerStarted) {
+    throw new Error('Scheduler already started: refusing duplicate initScheduler call after the double-scheduler incident that fired ~523 duplicate tasks');
+  }
+
   sender = send;
-  intervalId = setInterval(runDueTasks, 60_000);
-  logger.info('Scheduler initialized (polling every 60s)');
+  schedulerStarted = true;
+  try {
+    resyncActiveTaskRuns();
+    intervalId = setInterval(runDueTasks, 60_000);
+    logger.info('Scheduler initialized (polling every 60s)');
+  } catch (err) {
+    schedulerStarted = false;
+    throw err;
+  }
 }
 
 /**
@@ -44,6 +63,26 @@ export function initScheduler(send: Sender): void {
 export async function runDueTasks(): Promise<void> {
   const tasks = getDueTasks();
   for (const task of tasks) {
+    const now = Date.now();
+    let claimedNextRun: number;
+    try {
+      claimedNextRun = computeNextRun(task.schedule);
+    } catch (err) {
+      logger.error(
+        { taskId: task.id, schedule: task.schedule, err: errorMessage(err) },
+        'Scheduled task has invalid cron expression; skipping claim',
+      );
+      continue;
+    }
+
+    if (!claimTask(task.id, claimedNextRun, now)) {
+      logger.info(
+        { taskId: task.id, nextRun: new Date(claimedNextRun).toISOString() },
+        'Scheduled task already claimed by another executor; skipping',
+      );
+      continue;
+    }
+
     try {
       logger.info(
         { taskId: task.id, prompt: task.prompt.slice(0, 50) },
@@ -122,10 +161,11 @@ export async function runDueTasks(): Promise<void> {
 
 /**
  * Given a cron expression, return the next fire time as a Unix timestamp (ms).
- * Uses milliseconds to match Date.now() comparisons in getDueTasks().
+ * Cron expressions are evaluated in TIMEZONE. Uses milliseconds to match
+ * Date.now() comparisons in getDueTasks().
  */
 export function computeNextRun(cronExpression: string): number {
-  const interval = parseExpression(cronExpression);
+  const interval = parseExpression(cronExpression, { tz: TIMEZONE });
   return interval.next().getTime();
 }
 
@@ -137,4 +177,28 @@ export function stopScheduler(): void {
     clearInterval(intervalId);
     intervalId = null;
   }
+  schedulerStarted = false;
+}
+
+function resyncActiveTaskRuns(): void {
+  const tasks = getActiveTasks();
+  for (const task of tasks) {
+    try {
+      const nextRun = computeNextRun(task.schedule);
+      setTaskNextRun(task.id, nextRun);
+      logger.info(
+        { taskId: task.id, schedule: task.schedule, nextRun: new Date(nextRun).toISOString() },
+        'Scheduled task next_run resynced',
+      );
+    } catch (err) {
+      logger.error(
+        { taskId: task.id, schedule: task.schedule, err: errorMessage(err) },
+        'Failed to resync scheduled task next_run',
+      );
+    }
+  }
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }

@@ -14,6 +14,7 @@ const { parseExpression } = cronParser;
 import {
   TELEGRAM_BOT_TOKEN,
   ALLOWED_CHAT_ID,
+  TIMEZONE,
   MAX_MESSAGE_LENGTH,
   TYPING_REFRESH_MS,
 } from './config.js';
@@ -382,7 +383,7 @@ async function handleScheduleCommand(
           `ID: <code>${id.slice(0, 8)}...</code>`,
           `Schedule: <code>${cron}</code>`,
           `Prompt: ${prompt}`,
-          `Next run: ${new Date(nextRun).toLocaleString()}`,
+          `Next run: ${new Date(nextRun).toLocaleString('en-CA', { timeZone: TIMEZONE })} (${TIMEZONE})`,
         ].join('\n'),
         { parse_mode: 'HTML' },
       );
@@ -398,7 +399,7 @@ async function handleScheduleCommand(
       const lines = tasks.map((t: any) => {
         const status = t.status === 'active' ? 'Active' : 'Paused';
         const next = t.next_run
-          ? new Date(t.next_run).toLocaleString()
+          ? `${new Date(t.next_run).toLocaleString('en-CA', { timeZone: TIMEZONE })} (${TIMEZONE})`
           : '-';
         return [
           `<b>${t.id.slice(0, 8)}...</b> [${status}]`,
