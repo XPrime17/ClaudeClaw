@@ -249,13 +249,16 @@ export function searchMemories(
   queryText: string,
   limit = 3
 ): Memory[] {
-  // Sanitise FTS5 query: strip special chars, append prefix matching
+  // Sanitise FTS5 query: strip special chars, append prefix matching.
+  // Each token is double-quoted — FTS5 barewords reject characters like
+  // underscore (kept by \w), which crashed MATCH with 'syntax error near "*"'
+  // on any message containing e.g. a snake_case path.
   const sanitised = queryText.replace(/[^\w\s]/g, '').trim();
   if (!sanitised) return [];
 
   const ftsQuery = sanitised
     .split(/\s+/)
-    .map((t) => `${t}*`)
+    .map((t) => `"${t}"*`)
     .join(' ');
 
   return getDb()
