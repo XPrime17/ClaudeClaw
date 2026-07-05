@@ -68,7 +68,16 @@ export function buildPhotoMessage(
   caption?: string,
 ): string {
   const captionPart = caption ? ` with caption: "${caption}"` : '';
-  return `[The user sent a photo${captionPart}. The image has been saved to ${localPath}. Use the Read tool to view the image, then respond about what you see. If it looks like food, offer to log it as a meal.]`;
+  return `[The user sent a photo${captionPart}. The image has been saved to ${localPath}. Use the Read tool to view the image.
+
+If the photo shows food or a meal (or the caption says it is one), LOG IT IMMEDIATELY — do not ask for confirmation:
+1. Identify the visible foods as a short comma-separated description.
+2. Run: bun ~/.openclaw/workspace/meal_log/meal-log.ts log "<description>" --source=glasses
+   - If the caption names a meal type (breakfast/lunch/dinner/snack), append --meal=<type>; otherwise omit it — the logger infers from time of day.
+   - If the logger refuses (cooldown / daily cap), relay its message; do NOT add --force unless the caption explicitly insists.
+3. Reply with the logger's own confirmation (meal type + nutrition estimate). If any item was uncertain, add one short line saying so — the user can correct it with a follow-up.
+
+If the photo is NOT food, respond about what you see as normal.]`;
 }
 
 export function buildDocumentMessage(
