@@ -250,9 +250,9 @@ export function searchMemories(
   limit = 3
 ): Memory[] {
   // Sanitise FTS5 query: strip special chars, append prefix matching.
-  // Each token is double-quoted — FTS5 barewords reject characters like
-  // underscore (kept by \w), which crashed MATCH with 'syntax error near "*"'
-  // on any message containing e.g. a snake_case path.
+  // Each token is double-quoted — bare tokens that collide with FTS5
+  // operators (NOT/AND/OR/NEAR) make the query invalid ('syntax error
+  // near "*"'); any message containing the word "not" crashed MATCH.
   const sanitised = queryText.replace(/[^\w\s]/g, '').trim();
   if (!sanitised) return [];
 
