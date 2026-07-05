@@ -11,10 +11,14 @@ const dbMocks = vi.hoisted(() => ({
   upsertCompletionLog: vi.fn(),
   countLandedDays: vi.fn(),
   getTaskLandedDays: vi.fn(),
+  clearTaskNudgeEscalation: vi.fn(),
+  getTaskCompletionHistoryBefore: vi.fn(),
 }));
 
 const fsMocks = vi.hoisted(() => ({
   readFileSync: vi.fn(),
+  writeFileSync: vi.fn(),
+  renameSync: vi.fn(),
 }));
 
 const loggerMocks = vi.hoisted(() => ({
@@ -26,11 +30,20 @@ vi.mock('./db.js', () => dbMocks);
 vi.mock('fs', () => fsMocks);
 vi.mock('./logger.js', () => loggerMocks);
 
-import { entryLandedOnDay, sweepCompletions, resolveCheckFile } from './completion.js';
+import {
+  entryLandedOnDay,
+  sweepCompletions,
+  resolveCheckFile,
+  checkLandedToday,
+  consecutiveMissedDays,
+} from './completion.js';
 
 afterEach(() => {
   vi.clearAllMocks();
   dbMocks.getTasksWithChecks.mockReturnValue([]);
+  dbMocks.countLandedDays.mockReturnValue(0);
+  dbMocks.getTaskLandedDays.mockReturnValue(new Set<string>());
+  dbMocks.getTaskCompletionHistoryBefore.mockReturnValue([]);
 });
 
 describe('entryLandedOnDay — timestamp Toronto-day predicate', () => {
@@ -113,6 +126,157 @@ describe('sweepCompletions — error swallowing', () => {
     dbMocks.getTasksWithChecks.mockReturnValue([]);
     expect(() => sweepCompletions()).not.toThrow();
     expect(fsMocks.readFileSync).not.toHaveBeenCalled();
+  });
+});
+
+describe('checkLandedToday — live on-demand landing evaluation', () => {
+  const NOW = Date.parse('2026-07-05T18:00:00.000Z'); // 2026-07-05 14:00 Toronto
+
+  test('landed today: upserts landed row and clears the escalation flag', () => {
+    fsMocks.readFileSync.mockReturnValue(
+      JSON.stringify({
+        entries: [{ date: '2026-07-05', timestamp: '2026-07-05T13:00:00.000Z' }],
+      }),
+    );
+
+    const landed = checkLandedToday(
+      { id: 'weight-task', completion_check: JSON.stringify({ kind: 'weight' }) },
+      NOW,
+    );
+
+    expect(landed).toBe(true);
+    expect(dbMocks.upsertCompletionLog).toHaveBeenCalledTimes(1);
+    expect(dbMocks.upsertCompletionLog).toHaveBeenCalledWith(
+      expect.objectContaining({ taskId: 'weight-task', day: '2026-07-05', dataLanded: true }),
+    );
+    expect(dbMocks.clearTaskNudgeEscalation).toHaveBeenCalledWith('weight-task');
+  });
+
+  test('not landed today: upserts a not-landed row and never clears escalation', () => {
+    fsMocks.readFileSync.mockReturnValue(JSON.stringify({ entries: [] }));
+
+    const landed = checkLandedToday(
+      { id: 'weight-task', completion_check: JSON.stringify({ kind: 'weight' }) },
+      NOW,
+    );
+
+    expect(landed).toBe(false);
+    expect(dbMocks.upsertCompletionLog).toHaveBeenCalledWith(
+      expect.objectContaining({ taskId: 'weight-task', day: '2026-07-05', dataLanded: false }),
+    );
+    expect(dbMocks.clearTaskNudgeEscalation).not.toHaveBeenCalled();
+  });
+
+  test('no completion_check: returns false, no db writes, no file read', () => {
+    const landed = checkLandedToday({ id: 'plain-task', completion_check: null }, NOW);
+    expect(landed).toBe(false);
+    expect(fsMocks.readFileSync).not.toHaveBeenCalled();
+    expect(dbMocks.upsertCompletionLog).not.toHaveBeenCalled();
+  });
+});
+
+describe('consecutiveMissedDays — counts contiguous tracker-active misses backwards from yesterday', () => {
+  const NOW = Date.parse('2026-07-05T18:00:00.000Z'); // today = 2026-07-05 Toronto
+
+  test('no history rows: zero missed', () => {
+    dbMocks.getTaskCompletionHistoryBefore.mockReturnValue([]);
+    expect(consecutiveMissedDays('t', NOW)).toBe(0);
+  });
+
+  test('three contiguous missed days: returns 3', () => {
+    dbMocks.getTaskCompletionHistoryBefore.mockReturnValue([
+      { day: '2026-07-04', dataLanded: false },
+      { day: '2026-07-03', dataLanded: false },
+      { day: '2026-07-02', dataLanded: false },
+    ]);
+    expect(consecutiveMissedDays('t', NOW)).toBe(3);
+  });
+
+  test('stops counting at the first landed day', () => {
+    dbMocks.getTaskCompletionHistoryBefore.mockReturnValue([
+      { day: '2026-07-04', dataLanded: false },
+      { day: '2026-07-03', dataLanded: true }, // landed — stop here
+      { day: '2026-07-02', dataLanded: false },
+    ]);
+    expect(consecutiveMissedDays('t', NOW)).toBe(1);
+  });
+
+  test('stops at a calendar gap (missing row) — tracker was inactive that day', () => {
+    // Yesterday missed, but the day before that (2026-07-03) has no row: the
+    // next row jumps to 2026-07-02, breaking the contiguous chain.
+    dbMocks.getTaskCompletionHistoryBefore.mockReturnValue([
+      { day: '2026-07-04', dataLanded: false },
+      { day: '2026-07-02', dataLanded: false },
+    ]);
+    expect(consecutiveMissedDays('t', NOW)).toBe(1);
+  });
+
+  test('gap at yesterday itself (most recent row is older than yesterday) → zero', () => {
+    dbMocks.getTaskCompletionHistoryBefore.mockReturnValue([
+      { day: '2026-07-03', dataLanded: false },
+      { day: '2026-07-02', dataLanded: false },
+    ]);
+    expect(consecutiveMissedDays('t', NOW)).toBe(0);
+  });
+});
+
+describe('sweepCompletions — stats snapshot', () => {
+  test('writes nudge-stats.json atomically (tmp write then rename) with the expected shape', () => {
+    dbMocks.getTasksWithChecks.mockReturnValue([
+      {
+        id: 'weight-task-abcdef12',
+        completion_check: JSON.stringify({ kind: 'meal', mealType: 'breakfast' }),
+        nudge_escalated_day: '2026-07-04',
+      },
+    ]);
+    fsMocks.readFileSync.mockReturnValue(JSON.stringify({ entries: [] }));
+    dbMocks.countLandedDays.mockReturnValue(4);
+    dbMocks.getTaskLandedDays.mockReturnValue(new Set<string>());
+    dbMocks.getTaskCompletionHistoryBefore.mockReturnValue([]);
+
+    sweepCompletions(Date.parse('2026-07-05T18:00:00.000Z'));
+
+    expect(fsMocks.writeFileSync).toHaveBeenCalledTimes(1);
+    expect(fsMocks.renameSync).toHaveBeenCalledTimes(1);
+
+    const [tmpPath, contents] = fsMocks.writeFileSync.mock.calls[0];
+    const [renameFrom, renameTo] = fsMocks.renameSync.mock.calls[0];
+    // Atomic discipline: write to a .tmp sibling, then rename onto the target.
+    expect(String(tmpPath)).toMatch(/nudge-stats\.json\.tmp$/);
+    expect(renameFrom).toBe(tmpPath);
+    expect(String(renameTo)).toMatch(/nudge-stats\.json$/);
+
+    const payload = JSON.parse(String(contents)) as {
+      generatedAt: string;
+      dataDaysThisWeek: number;
+      tasks: Array<{
+        id8: string;
+        kind: string;
+        last7: Array<{ day: string; landed: boolean }>;
+        escalated: boolean;
+        consecutiveMissed: number;
+      }>;
+    };
+    expect(payload.generatedAt).toBe('2026-07-05T18:00:00.000Z');
+    expect(payload.dataDaysThisWeek).toBe(4);
+    expect(payload.tasks).toHaveLength(1);
+    expect(payload.tasks[0].id8).toBe('weight-t'); // 8-char slice
+    expect(payload.tasks[0].kind).toBe('meal:breakfast');
+    expect(payload.tasks[0].escalated).toBe(true);
+    expect(payload.tasks[0].last7).toHaveLength(7);
+    expect(payload.tasks[0].consecutiveMissed).toBe(0);
+  });
+
+  test('snapshot write failure is swallowed — sweep never throws', () => {
+    dbMocks.getTasksWithChecks.mockReturnValue([]);
+    fsMocks.renameSync.mockImplementation(() => {
+      throw new Error('disk full');
+    });
+    expect(() => sweepCompletions(Date.parse('2026-07-05T18:00:00.000Z'))).not.toThrow();
+    expect(loggerMocks.logger.error).toHaveBeenCalledWith(
+      expect.objectContaining({ err: 'disk full' }),
+      'Completion sweep: failed to write stats snapshot (swallowed)',
+    );
   });
 });
 

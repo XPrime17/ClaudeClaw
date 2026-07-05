@@ -8,6 +8,7 @@
  *   bun run src/schedule-cli.ts delete  <task_id>
  *   bun run src/schedule-cli.ts pause   <task_id>
  *   bun run src/schedule-cli.ts resume  <task_id>
+ *   bun run src/schedule-cli.ts resume-nudge <task_id>
  */
 
 import { randomUUID } from 'crypto';
@@ -22,6 +23,7 @@ import {
   resumeTask,
   setTaskCompletionCheck,
   getTasksWithChecks,
+  clearTaskNudgeEscalation,
 } from './db.js';
 import {
   getDataDaysThisWeek,
@@ -46,6 +48,7 @@ Commands:
   delete <task_id>                      Delete a task by ID
   pause  <task_id>                      Pause a task
   resume <task_id>                      Resume a paused task
+  resume-nudge <task_id>                Clear a nudge circuit breaker (resume nudges)
   set-check <task_id> weight|meal [mealType]  Track whether nudged data lands
   clear-check <task_id>                 Stop tracking data landing
   stats                                 Show data-days/week + landing maps
@@ -190,6 +193,23 @@ switch (command) {
     }
     resumeTask(args[0]);
     console.log(`Resumed task: ${args[0]}`);
+    break;
+  }
+
+  case 'resume-nudge': {
+    if (!args[0]) {
+      console.error('Usage: schedule-cli resume-nudge <task_id>');
+      process.exit(1);
+    }
+    const cleared = clearTaskNudgeEscalation(args[0]);
+    if (cleared) {
+      console.log(`Nudge circuit breaker cleared: ${args[0]}`);
+    } else {
+      // Either the task id was unknown or the breaker was not active. Both are
+      // safe no-ops from the user's perspective — surface it so they aren't
+      // left wondering whether the command took effect.
+      console.log(`No active nudge breaker to clear for: ${args[0]}`);
+    }
     break;
   }
 

@@ -1,10 +1,13 @@
-import { readFileSync } from 'fs';
+import { readFileSync, renameSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { TIMEZONE, WORKSPACE_DIR } from './config.js';
 import {
+  clearTaskNudgeEscalation,
   countLandedDays,
+  getTaskCompletionHistoryBefore,
   getTaskLandedDays,
   getTasksWithChecks,
+  type ScheduledTask,
   upsertCompletionLog,
 } from './db.js';
 import { logger } from './logger.js';
@@ -109,6 +112,104 @@ function parseCheck(json: string | null): CompletionCheck | null {
   }
 }
 
+function evaluateLanding(
+  entries: DataEntry[],
+  day: string,
+  check: CompletionCheck,
+): { landed: boolean; landedAt: number | null } {
+  for (const entry of entries) {
+    if (entryLandedOnDay(entry, day, TIMEZONE, check.mealType)) {
+      const ms = entry.timestamp ? Date.parse(entry.timestamp) : NaN;
+      return {
+        landed: true,
+        landedAt: Number.isNaN(ms) ? null : ms,
+      };
+    }
+  }
+
+  return { landed: false, landedAt: null };
+}
+
+function clearEscalationOnLanding(taskId: string): void {
+  clearTaskNudgeEscalation(taskId);
+}
+
+export function checkLandedToday(
+  task: Pick<ScheduledTask, 'id' | 'completion_check'>,
+  now = Date.now(),
+): boolean {
+  const check = parseCheck(task.completion_check);
+  if (!check) return false;
+
+  const today = recentDays(1, TIMEZONE, now)[0];
+  const entries = readEntries(resolveCheckFile(check));
+  const landing = evaluateLanding(entries, today, check);
+
+  upsertCompletionLog({
+    taskId: task.id,
+    day: today,
+    dataLanded: landing.landed,
+    landedAt: landing.landedAt,
+    checkedAt: now,
+  });
+
+  if (landing.landed) {
+    clearEscalationOnLanding(task.id);
+  }
+
+  return landing.landed;
+}
+
+export function consecutiveMissedDays(taskId: string, now = Date.now()): number {
+  const today = recentDays(1, TIMEZONE, now)[0];
+  const rows = getTaskCompletionHistoryBefore(taskId, today);
+  if (rows.length === 0) return 0;
+
+  const expectedDays = recentDays(rows.length + 1, TIMEZONE, now).slice(1);
+  let missed = 0;
+
+  for (const [index, expectedDay] of expectedDays.entries()) {
+    const row = rows[index];
+    if (!row) break;
+    if (row.day !== expectedDay) break;
+    if (row.dataLanded) break;
+    missed += 1;
+  }
+
+  return missed;
+}
+
+function writeStatsSnapshot(now: number): void {
+  const snapshotPath = join(WORKSPACE_DIR, 'nudge-stats.json');
+  const tmpPath = `${snapshotPath}.tmp`;
+  const tasks = getTasksWithChecks();
+  const payload = {
+    generatedAt: new Date(now).toISOString(),
+    dataDaysThisWeek: getDataDaysThisWeek(now),
+    tasks: tasks.flatMap((task) => {
+      const check = parseCheck(task.completion_check);
+      if (!check) {
+        logger.error(
+          { taskId: task.id, completionCheck: task.completion_check },
+          'Completion sweep: invalid completion_check skipped in stats snapshot',
+        );
+        return [];
+      }
+
+      return [{
+        id8: task.id.slice(0, 8),
+        kind: check.mealType ? `${check.kind}:${check.mealType}` : check.kind,
+        last7: getTaskLandingMap(task.id, now),
+        escalated: task.nudge_escalated_day !== null,
+        consecutiveMissed: consecutiveMissedDays(task.id, now),
+      }];
+    }),
+  };
+
+  writeFileSync(tmpPath, `${JSON.stringify(payload, null, 2)}\n`, 'utf-8');
+  renameSync(tmpPath, snapshotPath);
+}
+
 /**
  * Evaluate data landing for every checked task over the last 3 local days and
  * upsert results. LOG-ONLY — this must never influence scheduling. Every path
@@ -118,8 +219,6 @@ function parseCheck(json: string | null): CompletionCheck | null {
 export function sweepCompletions(now = Date.now()): void {
   try {
     const tasks = getTasksWithChecks();
-    if (tasks.length === 0) return;
-
     const days = recentDays(3, TIMEZONE, now); // today, yesterday, day-before
 
     for (const task of tasks) {
@@ -128,27 +227,24 @@ export function sweepCompletions(now = Date.now()): void {
         if (!check) continue;
 
         const entries = readEntries(resolveCheckFile(check));
+        let landedDuringSweep = false;
 
         for (const day of days) {
-          // A date-fallback match (no parseable timestamp) still counts as
-          // landed — it just has no landed_at instant to record.
-          let landed = false;
-          let landedAt: number | null = null;
-          for (const entry of entries) {
-            if (entryLandedOnDay(entry, day, TIMEZONE, check.mealType)) {
-              landed = true;
-              const ms = entry.timestamp ? Date.parse(entry.timestamp) : NaN;
-              landedAt = Number.isNaN(ms) ? null : ms;
-              break;
-            }
-          }
+          const landing = evaluateLanding(entries, day, check);
           upsertCompletionLog({
             taskId: task.id,
             day,
-            dataLanded: landed,
-            landedAt,
+            dataLanded: landing.landed,
+            landedAt: landing.landedAt,
             checkedAt: now,
           });
+          if (landing.landed) {
+            landedDuringSweep = true;
+          }
+        }
+
+        if (landedDuringSweep) {
+          clearEscalationOnLanding(task.id);
         }
       } catch (err) {
         logger.error(
@@ -161,6 +257,15 @@ export function sweepCompletions(now = Date.now()): void {
     logger.error(
       { err: err instanceof Error ? err.message : String(err) },
       'Completion sweep: top-level error (swallowed)',
+    );
+  }
+
+  try {
+    writeStatsSnapshot(now);
+  } catch (err) {
+    logger.error(
+      { err: err instanceof Error ? err.message : String(err) },
+      'Completion sweep: failed to write stats snapshot (swallowed)',
     );
   }
 }

@@ -5,11 +5,17 @@ import {
   claimTask,
   getActiveTasks,
   getDueTasks,
+  markTaskNudgeEscalated,
   setTaskNextRun,
   updateTaskAfterRun,
 } from './db.js';
 import { runAgent, formatAgentError } from './agent.js';
-import { sweepCompletions } from './completion.js';
+import {
+  checkLandedToday,
+  consecutiveMissedDays,
+  recentDays,
+  sweepCompletions,
+} from './completion.js';
 import { logger } from './logger.js';
 
 type Sender = (chatId: string, text: string) => Promise<void>;
@@ -39,6 +45,7 @@ const failureCounts = new Map<string, number>();
 /** Log-only completion sweep runs at most hourly; never affects scheduling. */
 const SWEEP_INTERVAL_MS = 60 * 60_000;
 let lastSweepMs = 0;
+const NUDGE_BREAKER_THRESHOLD = 3;
 
 /**
  * Start the scheduler loop. Call once at boot after the bot is ready.
@@ -91,6 +98,42 @@ export async function runDueTasks(): Promise<void> {
     }
 
     try {
+      if (task.completion_check) {
+        if (checkLandedToday(task, now)) {
+          logger.info(
+            { taskId: task.id, day: recentDays(1, TIMEZONE, now)[0] },
+            'Scheduled task skipped because data already landed today',
+          );
+          continue;
+        }
+
+        if (task.nudge_escalated_day !== null) {
+          logger.info(
+            { taskId: task.id, escalatedDay: task.nudge_escalated_day },
+            'Scheduled task nudge suppressed because the circuit breaker is already active',
+          );
+          continue;
+        }
+
+        const missedDays = consecutiveMissedDays(task.id, now);
+        if (missedDays >= NUDGE_BREAKER_THRESHOLD) {
+          const today = recentDays(1, TIMEZONE, now)[0];
+          const escalated = markTaskNudgeEscalated(task.id, today);
+          if (escalated) {
+            const kind = formatCompletionKind(task.completion_check);
+            await sender(
+              task.chat_id,
+              `⚠️ ${missedDays} days of ${kind} nudges with no data landed. Pausing this nudge until data lands. (Log data or /schedule resume-nudge ${task.id.slice(0, 8)} to resume.)`,
+            );
+          }
+          logger.info(
+            { taskId: task.id, consecutiveMissed: missedDays, escalated },
+            'Scheduled task nudge suppressed by circuit breaker',
+          );
+          continue;
+        }
+      }
+
       logger.info(
         { taskId: task.id, prompt: task.prompt.slice(0, 50) },
         'Running scheduled task',
@@ -219,4 +262,23 @@ function runCompletionSweep(): void {
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+function formatCompletionKind(completionCheck: string): string {
+  try {
+    const parsed = JSON.parse(completionCheck) as {
+      kind?: 'weight' | 'meal';
+      mealType?: string;
+    };
+    if (parsed.kind === 'weight') {
+      return 'weight';
+    }
+    if (parsed.kind === 'meal') {
+      return parsed.mealType ? `meal:${parsed.mealType}` : 'meal';
+    }
+  } catch {
+    // Invalid JSON falls back to a generic label so the nudge can still be suppressed safely.
+  }
+
+  return 'tracked';
 }

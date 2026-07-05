@@ -104,6 +104,9 @@ export function initDatabase(): Database.Database {
   if (!taskCols.some((c) => c.name === 'completion_check')) {
     db.exec(`ALTER TABLE scheduled_tasks ADD COLUMN completion_check TEXT NULL;`);
   }
+  if (!taskCols.some((c) => c.name === 'nudge_escalated_day')) {
+    db.exec(`ALTER TABLE scheduled_tasks ADD COLUMN nudge_escalated_day TEXT NULL;`);
+  }
 
   // -------------------------------------------------------------------------
   // Task completion log (log-only: records whether the user's data landed
@@ -319,6 +322,7 @@ export interface ScheduledTask {
   last_result: string | null;
   status: 'active' | 'paused';
   completion_check: string | null;
+  nudge_escalated_day: string | null;
   created_at: number;
 }
 
@@ -421,6 +425,28 @@ export function pauseTask(id: string): boolean {
 export function resumeTask(id: string): boolean {
   const result = getDb()
     .prepare("UPDATE scheduled_tasks SET status = 'active' WHERE id = ?")
+    .run(id);
+  return result.changes > 0;
+}
+
+export function markTaskNudgeEscalated(id: string, day: string): boolean {
+  const result = getDb()
+    .prepare(
+      `UPDATE scheduled_tasks
+       SET nudge_escalated_day = ?
+       WHERE id = ? AND nudge_escalated_day IS NULL`
+    )
+    .run(day, id);
+  return result.changes > 0;
+}
+
+export function clearTaskNudgeEscalation(id: string): boolean {
+  const result = getDb()
+    .prepare(
+      `UPDATE scheduled_tasks
+       SET nudge_escalated_day = NULL
+       WHERE id = ? AND nudge_escalated_day IS NOT NULL`
+    )
     .run(id);
   return result.changes > 0;
 }
@@ -565,4 +591,21 @@ export function getTaskLandedDays(taskId: string, days: string[]): Set<string> {
     )
     .all(taskId, ...days) as Array<{ day: string }>;
   return new Set(rows.map((r) => r.day));
+}
+
+export function getTaskCompletionHistoryBefore(
+  taskId: string,
+  beforeDay: string,
+): Array<{ day: string; dataLanded: boolean }> {
+  const rows = getDb()
+    .prepare(
+      `SELECT day, data_landed FROM task_completion_log
+       WHERE task_id = ? AND day < ?
+       ORDER BY day DESC`
+    )
+    .all(taskId, beforeDay) as Array<{ day: string; data_landed: number }>;
+  return rows.map((row) => ({
+    day: row.day,
+    dataLanded: row.data_landed === 1,
+  }));
 }
