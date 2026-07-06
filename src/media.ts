@@ -66,13 +66,29 @@ export async function downloadMedia(
 export function buildPhotoMessage(
   localPath: string,
   caption?: string,
+  chatId?: number,
+  familyGroupId?: number | null,
 ): string {
+  // Determine if this photo comes from the family group.
+  // Telegram group/supergroup IDs are negative; use that as fallback when no explicit ID is configured.
+  const isNegativeId = chatId != null && chatId < 0;
+  const isFamilyChat = familyGroupId != null
+    ? chatId === familyGroupId
+    : isNegativeId;
+
   const captionPart = caption ? ` with caption: "${caption}"` : '';
+
+  if (isFamilyChat) {
+    return `[A family member sent a food photo${captionPart}. The image has been saved to ${localPath}. Use the Read tool to view the image.
+
+If the photo shows food or a meal, describe what you see warmly and briefly. Do NOT run meal-log.ts or log anything to the personal diet tracker — this came from the family group chat, not from Scott's glasses. Respond in a friendly, casual tone (one or two sentences). If the photo is not food, describe what you see as normal.]`;
+  }
+
   return `[The user sent a photo${captionPart}. The image has been saved to ${localPath}. Use the Read tool to view the image.
 
 If the photo shows food or a meal (or the caption says it is one), LOG IT IMMEDIATELY — do not ask for confirmation:
 1. Identify the visible foods as a short comma-separated description.
-2. Run: bun ~/.openclaw/workspace/meal_log/meal-log.ts log "<description>" --source=glasses
+2. Run: bun ~/.openclaw/workspace/meal_log/meal-log.ts log "<description>" --source=glasses --photoPath=${localPath}
    - If the caption names a meal type (breakfast/lunch/dinner/snack), append --meal=<type>; otherwise omit it — the logger infers from time of day.
    - If the logger refuses (cooldown / daily cap), relay its message; do NOT add --force unless the caption explicitly insists.
 3. Reply with the logger's own confirmation (meal type + nutrition estimate). If any item was uncertain, add one short line saying so — the user can correct it with a follow-up.

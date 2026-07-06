@@ -26,6 +26,9 @@ export const TELEGRAM_BOT_TOKEN = env.TELEGRAM_BOT_TOKEN ?? '';
 /** Comma-separated chat IDs that are allowed to interact with the bot. */
 export const ALLOWED_CHAT_ID = env.ALLOWED_CHAT_ID ?? '';
 
+/** Chat ID of the family Telegram group. Photos from this chat are NOT routed to the personal diet log. Negative in Telegram (group IDs are negative). If absent from env, falls back to negative-ID heuristic in media.ts. */
+export const FAMILY_GROUP_CHAT_ID: number | null = env.FAMILY_GROUP_CHAT_ID ? Number(env.FAMILY_GROUP_CHAT_ID) : null;
+
 /** Groq API key for speech-to-text (Whisper). */
 export const GROQ_API_KEY = env.GROQ_API_KEY ?? '';
 

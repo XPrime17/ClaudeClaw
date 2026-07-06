@@ -14,6 +14,7 @@ const { parseExpression } = cronParser;
 import {
   TELEGRAM_BOT_TOKEN,
   ALLOWED_CHAT_ID,
+  FAMILY_GROUP_CHAT_ID,
   TIMEZONE,
   MAX_MESSAGE_LENGTH,
   TYPING_REFRESH_MS,
@@ -253,9 +254,10 @@ async function handleMessage(
 
   try {
     // Run through Claude Code agent
+    const senderPrefix = username ? `[From: @${username}]\n` : '';
     const prompt = memoryContext
-      ? `${memoryContext}\n\nUser message: ${userMessage}`
-      : userMessage;
+      ? `${memoryContext}\n\nUser message: ${senderPrefix}${userMessage}`
+      : `${senderPrefix}${userMessage}`;
 
     const result = await runAgent(prompt, sessionId ?? undefined);
 
@@ -592,7 +594,7 @@ export function createBot(): Bot {
       const localPath = await downloadMedia(largest.file_id, 'photo');
       const caption = ctx.message.caption;
 
-      const prompt = buildPhotoMessage(localPath, caption);
+      const prompt = buildPhotoMessage(localPath, caption, chatId, FAMILY_GROUP_CHAT_ID);
       await handleMessage(bot, chatId, prompt, ctx.from?.username);
     } catch (err: any) {
       logger.error({ err: err.message, chatId }, 'Photo processing failed');
